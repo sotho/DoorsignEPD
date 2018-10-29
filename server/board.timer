@@ -1,0 +1,8 @@
+[Unit]
+Description=Recreate board image
+
+[Timer]
+OnCalendar=*-*-* *:29,59:00
+
+[Install]
+WantedBy=timers.target

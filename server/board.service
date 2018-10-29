@@ -1,0 +1,20 @@
+[Unit]
+Description=Create image for board
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/board
+User=www-data
+Group=www-data
+Type=oneshot
+ProtectSystem=full
+ReadWritePaths=/var/www/html/board/
+PrivateDevices=yes
+PrivateUsers=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

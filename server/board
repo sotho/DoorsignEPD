@@ -1,0 +1,425 @@
+#!/usr/bin/python3
+
+import argparse
+import datetime
+import functools
+import httplib2
+import locale
+import os
+import pytz
+import struct
+import sys
+import time
+
+from apiclient import discovery
+from oauth2client import client
+from oauth2client import tools
+from oauth2client.file import Storage
+
+
+from PIL import Image, ImageFont, ImageDraw, ImageOps
+
+# If modifying these scopes, delete your previously saved credentials
+# at ~/.credentials/calendar-python-quickstart.json
+SCOPES = ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/tasks.readonly']
+CLIENT_SECRET_FILE = '/usr/local/share/board/client_secret.json'
+APPLICATION_NAME = 'Google Calendar API myBoard'
+FONT='Arial.ttf'
+OUTPUT='/var/www/html/board/board'
+MAXX=640
+MAXY=384
+BORDER=10
+# if the task has a due time within this time, then display it before all others
+DUETIME=+24*60*60*7
+BLACKLIST_CAL_ID=('G', 'W')
+
+def writeRaw(image, filename):
+    try:
+        with open(filename, "rb") as f:
+            id = struct.unpack("B", f.read(1))[0] + 1
+            if id == 0:
+                id = 1
+            olddata = f.read()
+    except FileNotFoundError:
+        id = 1
+        olddata = None
+
+    newdata = bytes([255-i for i in image.tobytes(encoder_name = 'raw')])
+
+    if olddata != newdata:
+        with open(filename, "wb") as f:
+            f.write(struct.pack("B", id) + newdata)
+
+
+def newLine(draw, y):
+    draw.line(
+        xy = [(0, y), (MAXX, y)]
+    )
+
+
+def drawTime(draw):
+    # when run at 23:59, use date of tomorrow
+    now = time.localtime(time.time()+180)
+
+    for i in range(68, 49, -1):
+        font = ImageFont.truetype(FONT, i)
+        size = draw.textsize(
+            text = time.strftime("%A %d.%m.%Y", now),
+            font = font
+        )
+        if size[0] <= MAXX - 2*BORDER:
+            break
+
+    draw.text(
+        xy    = (BORDER, BORDER),
+        text  = time.strftime("%A", now),
+        font  = font
+    )
+    date = time.strftime("%d.%m.%Y", now)
+    size = draw.textsize(
+        text = date,
+        font = font
+    )
+    draw.text(
+        xy    = (MAXX-size[0]-BORDER, BORDER),
+        text  = date,
+        font  = font
+    )
+    newLine(draw, size[1]+BORDER+15)
+
+    return size[1]+BORDER+15
+
+
+def drawTime2(draw):
+    # when run at 23:59, use date of tomorrow
+    now = time.localtime(time.time()+180)
+
+    date = time.strftime("%d.%m.%Y", now)
+    font = ImageFont.truetype(FONT, 14)
+    size = draw.textsize(
+        text = date,
+        font = font
+    )
+    draw.text(
+        xy    = (MAXX-size[0]-BORDER, BORDER),
+        text  = date,
+        font  = font
+    )
+    newLine(draw, size[1]+BORDER+7)
+
+    return size[1]+BORDER+10
+
+
+def get_credentials():
+    """Gets valid user credentials from storage.
+
+    If nothing has been stored, or if the stored credentials are invalid,
+    the OAuth2 flow is completed to obtain the new credentials.
+
+    Returns:
+        Credentials, the obtained credential.
+    """
+    credential_dir = os.path.expanduser('~/.config/myBoard')
+    if not os.path.exists(credential_dir):
+        os.makedirs(credential_dir)
+
+    credential_path = os.path.join(credential_dir, 'credentials-myboard.json')
+
+    store = Storage(credential_path)
+    credentials = store.get()
+    if not credentials or credentials.invalid:
+        flow = client.flow_from_clientsecrets(CLIENT_SECRET_FILE, SCOPES)
+        flow.user_agent = APPLICATION_NAME
+        flags = argparse.ArgumentParser(parents=[tools.argparser]).parse_args()
+        credentials = tools.run_flow(
+            flow,
+            store,
+            flags
+        )
+        print('Storing credentials to ' + credential_path)
+    return credentials
+
+calendarIdMap = {
+    "XXXXXXXXXXXXXXXXXXXXXXXXXX@group.calendar.google.com": "F", # F...
+    "YYYYYYYYYYYYYYYYYYYYYYYYYY@group.calendar.google.com": "*", # Familie
+    "ZZZZZZZZZZZZZ@googlemail.com"                        : "M", # Mama
+    "AAAAAAAAAAAAAAAAAAAAAAAAAA@group.calendar.google.com": "A", # A...
+    "BBBBBBBBBBBBBB@gmail.com"                            : "P", # Papa
+    "#contacts@group.v.calendar.google.com"               : "G", # Geburtstage
+    "de.german#holiday@group.v.calendar.google.com"       : "H", # Feiertage
+    "e_2_de#weeknum@group.v.calendar.google.com"          : "W", # Kalenderwoche
+}
+
+def calendarList(service):
+    page_token = None
+    while True:
+        calendar_list = service.calendarList().list(pageToken=page_token).execute()
+        for calendar_list_entry in calendar_list['items']:
+            if calendar_list_entry.get('selected', False):
+                if calendar_list_entry['id'] not in calendarIdMap:
+                    print("unknown calendar id: %s" % calendar_list_entry['id'])
+                yield calendar_list_entry['id'], \
+                    calendar_list_entry['summary'], \
+                    calendarIdMap.get(calendar_list_entry['id'], '?')
+        page_token = calendar_list.get('nextPageToken')
+        if not page_token:
+            break
+
+localtz = pytz.timezone("CET")
+
+class DateTime(datetime.datetime):
+    @property
+    def dateonly(self):
+        return self._dateonly
+
+    @classmethod
+    def strptime(cls, date_string, format):
+        'string, format -> new datetime parsed from a string (like time.strptime()).'
+        import _strptime
+        result = _strptime._strptime_datetime(cls, date_string, format)
+        result._dateonly = 'T' not in date_string
+
+        return result.astimezone(localtz)
+
+    def astimezone(self, tz):
+        t = datetime.datetime.astimezone(self, tz)
+        result = DateTime(t.year, t.month, t.day, t.hour, t.minute, t.second, t.microsecond, t.tzinfo)
+        result._dateonly = self.dateonly
+
+        return result
+
+
+datetimeFormats = ['%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%d%z', '%Y-%m-%dT%H:%M:%S.%f%z']
+def parseTime(t):
+    if t is None:
+        return None
+    if '+' in t:
+        # change time zone from "+01:00" to "+0100"
+        a, b = t.split('+', 1)
+        b = b.replace(':', '')
+        t = "%s+%s" % (a, b)
+    elif t.endswith("Z"):
+        t = "%s+0000" % t[:-1]
+    else:
+        t = "%s+0100" % t
+
+    for f in datetimeFormats:
+        try:
+            return DateTime.strptime(t, f)
+        except ValueError:
+            pass
+
+    raise ValueError("Cannot parse: %s" % t)
+
+def calendarEvents(service):
+    now = datetime.datetime.utcnow().isoformat() + 'Z' # 'Z' indicates UTC time
+
+    for calid, summary, abbrev in calendarList(service):
+        eventsResult = service.events().list(
+            calendarId=calid, timeMin=now, maxResults=10, singleEvents=True,
+            orderBy='startTime').execute()
+        events = eventsResult.get('items', [])
+
+        for event in events:
+            start = event['start'].get('dateTime', event['start'].get('date'))
+            yield parseTime(start), event['summary'], abbrev
+
+
+def drawCal(draw, y):
+    credentials = get_credentials()
+    http = credentials.authorize(httplib2.Http())
+    service = discovery.build('calendar', 'v3', http=http)
+
+    font = ImageFont.truetype(FONT, 20)
+    x_day  = 0
+    x_date = 30
+    x_time = 95
+    x_summary = 160
+    height = draw.textsize(
+        text = "Mo",
+        font = font
+    )[1] + 10
+
+    current_date = None
+    for i in sorted(calendarEvents(service)):
+        if i[2] in BLACKLIST_CAL_ID:
+            continue
+        if current_date != i[0].date():
+            if current_date is not None:
+                newLine(draw, y)
+                y+=5
+
+            current_date = i[0].date()
+            draw.text(
+                xy = (x_day+BORDER, y),
+                text = "%s" % i[0].strftime("%a"),
+                font = font
+            )
+            draw.text(
+                xy = (x_date+BORDER, y),
+                text = "%s" % i[0].strftime("%d.%m."),
+                font = font
+            )
+
+        if not i[0].dateonly:
+            draw.text(
+                xy = (x_time+BORDER, y),
+                text = i[0].strftime("%H:%M"),
+                font = font
+            )
+
+        draw.text(
+            xy = (x_summary+BORDER, y),
+            text = i[1].strip().replace("  ", " "),
+            font = font
+        )
+        y += height
+
+        if y >= MAXY-BORDER:
+            break
+
+
+def cal():
+    image = Image.new(
+        mode = "1",
+        size = (MAXX, MAXY),
+        color = 1,
+    )
+    draw = ImageDraw.Draw(image)
+
+    y = drawTime(draw)
+    drawCal(draw, y + 5)
+
+    writeRaw(image, OUTPUT + ".raw")
+    image.save(OUTPUT + ".png", "png")
+
+def taskList(service):
+    page_token = None
+    while True:
+        task_list = service.tasks().list(tasklist='@default', pageToken=page_token).execute()
+        for task in task_list['items']:
+            yield task['status'], task['title'], task.get('notes', None), parseTime(task.get('due', None)), task.get('position')
+        page_token = task_list.get('nextPageToken')
+        if not page_token:
+            break
+
+STATUS={
+    "needsAction": u"\u2610",
+    "completed"  : "X", #u"\u2714",
+}
+
+def drawTasks(draw, y):
+    credentials = get_credentials()
+    http = credentials.authorize(httplib2.Http())
+    service = discovery.build('tasks', 'v1', http=http)
+
+    font1 = ImageFont.truetype(FONT, 20)
+    font2 = ImageFont.truetype(FONT, 14)
+    x_status = 0
+    x_date   = 30
+    x_title  = 95
+    height1  = draw.textsize(
+        text = "Mo",
+        font = font1
+    )[1] + 10
+    height2 = draw.textsize(
+        text = "Mo",
+        font = font2
+    )[1] + 10
+
+    def cmpPosition(x, y):
+        if x[4] < y[4]:
+            return -1
+        elif x[4] == y[4]:
+            return 0
+        else:
+            return 1
+
+    def isPriority(x):
+        return x[3] is not None and x[3].timestamp() < time.time() + DUETIME
+
+    def cmpTask(x, y):
+        prio_x = isPriority(x)
+        prio_y = isPriority(y)
+
+        if prio_x:
+            if prio_y:
+                return cmpPosition(x, y)
+            else: # not prio_y
+                return -1
+        else: # not prio_x
+            if prio_y:
+                return 1
+            else:
+                return cmpPosition(x, y)
+
+
+    for status, title, notes, due, position in sorted(taskList(service), key=functools.cmp_to_key(cmpTask)):
+        #print(status, title, notes, due.strftime('%d.%m') if due is not None else "", position)
+        draw.text(
+            xy = (x_status+BORDER, y),
+            text = STATUS.get(status, "?"),
+            font = font1
+        )
+        if due is not None:
+            draw.text(
+                xy = (x_date+BORDER, y),
+                text = due.strftime('%d.%m'),
+                font = font1
+            )
+
+        draw.text(
+            xy = (x_title+BORDER, y),
+            text = title,
+            font = font1
+        )
+        if status == "completed":
+            length = draw.textsize(text = title, font = font1)[0]
+            draw.line(
+                xy= ((x_status+BORDER, y+12), (x_title-x_status+BORDER+length, y+12))
+            )
+        y += height1
+        if status != "completed" and notes:
+            draw.text(
+                xy = (x_title+BORDER, y),
+                text = notes,
+                font = font2
+            )
+            y += height2
+
+
+
+        if y >= MAXY-BORDER:
+            break
+
+
+def tasks():
+    """Shows basic usage of the Google Tasks API.
+
+    Creates a Google Tasks API service object and outputs the first 10
+    task lists.
+    """
+    image = Image.new(
+        mode = "1",
+        size = (MAXX, MAXY),
+        color = 1,
+    )
+    draw = ImageDraw.Draw(image)
+
+    y = drawTime2(draw)
+    drawTasks(draw, y + 5)
+
+    writeRaw(image, OUTPUT + "2.raw")
+    image.save(OUTPUT + "2.png", "png")
+
+
+def main():
+    locale.setlocale(locale.LC_ALL, 'de_DE.UTF-8')
+    if len(sys.argv) == 2:
+        global OUTPUT
+        OUTPUT=sys.argv[1]
+    cal()
+    tasks()
+
+if __name__ == "__main__":
+    main()
